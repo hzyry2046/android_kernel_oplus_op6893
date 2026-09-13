@@ -195,11 +195,53 @@ static __cpuidle int psci_enter_idle_state(struct cpuidle_device *dev,
 	return CPU_PM_CPU_IDLE_ENTER_PARAM_RCU(psci_cpu_suspend_enter, idx, state[idx]);
 }
 
+/*
+ * op6893 6.6 bring-up: the preserved 4.19 DTB spells its CPU idle states
+ * "mediatek,idle-state".  On 4.19 that was matched by
+ * drivers/cpuidle/cpuidle-mediatek.c, whose table listed both that
+ * compatible and "arm,idle-state"; upstream knows only the latter, so
+ * of_match_node() in dt_init_idle_driver() fails on the very first state
+ * node, dt_init_idle_driver() returns -ENODEV, and psci_idle_init_cpu()
+ * gives up before cpuidle_register().  The board then has no cpuidle
+ * driver at all and every core sits in the default architectural WFI --
+ * cpu-off, cluster-off and MCUSYS-off never happen.
+ *
+ * The nodes are plain PSCI states (entry-method "arm,psci", with
+ * arm,psci-suspend-param, entry-/exit-latency-us and min-residency-us), so
+ * the generic enter function is the correct one.  4.19's own enter
+ * function added only a notification hook -- mtk_lp_cpuidle_prepare()
+ * unconditionally returns 0, so it never vetoed a state once the mtk-lpm
+ * module had registered its ops.  Per-request arbitration happens at EL3.
+ */
 static const struct of_device_id psci_idle_state_match[] = {
 	{ .compatible = "arm,idle-state",
 	  .data = psci_enter_idle_state },
+	{ .compatible = "mediatek,idle-state",
+	  .data = psci_enter_idle_state },
 	{ },
 };
+
+/*
+ * op6893 6.6 bring-up: the deeper MediaTek states have never run on this
+ * port, and mcusysoff in particular powers the GIC down -- 4.19 only ever
+ * entered it with mtk-lpm loaded and that node's "irq-remain" list
+ * programmed, so that the wakeup interrupts survive.  Until mtk-lpm is in
+ * the ramdisk and that has been checked on device, allow the depth to be
+ * capped from the kernel command line and promoted one state at a time.
+ *
+ * -1, the default, keeps upstream behaviour.  Otherwise every state above
+ * index N is marked CPUIDLE_FLAG_OFF, which still enumerates it in sysfs
+ * and lets it be turned on at runtime with
+ * "echo 0 > /sys/devices/system/cpu/cpuN/cpuidle/stateM/disable".
+ *
+ * Index 0 is the architectural WFI this driver adds itself; the DT states
+ * follow in cpu-idle-states order, so on this board max_state=1 means
+ * WFI + cpu-off only.
+ */
+static int psci_max_state = -1;
+module_param_named(max_state, psci_max_state, int, 0444);
+MODULE_PARM_DESC(max_state,
+		 "highest idle state index left enabled at boot (-1: all)");
 
 int psci_dt_parse_state_node(struct device_node *np, u32 *state)
 {
@@ -372,6 +414,14 @@ static int psci_idle_init_cpu(struct device *dev, int cpu)
 	ret = dt_init_idle_driver(drv, psci_idle_state_match, 1);
 	if (ret <= 0)
 		return ret ? : -ENODEV;
+
+	/* op6893 6.6 bring-up: see psci_max_state above. */
+	if (psci_max_state >= 0) {
+		int i;
+
+		for (i = psci_max_state + 1; i < drv->state_count; i++)
+			drv->states[i].flags |= CPUIDLE_FLAG_OFF;
+	}
 
 	/*
 	 * Initialize PSCI idle states.
