@@ -189,6 +189,7 @@ void em_table_free(struct em_perf_table __rcu *table)
 {
 	kref_put(&table->kref, em_release_table_kref);
 }
+EXPORT_SYMBOL_GPL(em_table_free);
 
 /**
  * em_table_alloc() - Allocate a new EM table
@@ -213,6 +214,7 @@ struct em_perf_table __rcu *em_table_alloc(struct em_perf_domain *pd)
 
 	return table;
 }
+EXPORT_SYMBOL_GPL(em_table_alloc);
 
 static void em_init_performance(struct device *dev, struct em_perf_domain *pd,
 				struct em_perf_state *table, int nr_states)
@@ -263,6 +265,7 @@ static int em_compute_costs(struct device *dev, struct em_perf_state *table,
 		}
 
 		table[i].cost = cost;
+		table[i].flags &= ~EM_PERF_STATE_INEFFICIENT;
 
 		if (table[i].cost >= prev_cost) {
 			table[i].flags = EM_PERF_STATE_INEFFICIENT;
@@ -294,6 +297,7 @@ int em_dev_compute_costs(struct device *dev, struct em_perf_state *table,
 {
 	return em_compute_costs(dev, table, NULL, nr_states, 0);
 }
+EXPORT_SYMBOL_GPL(em_dev_compute_costs);
 
 /**
  * em_dev_update_perf_domain() - Update runtime EM table for a device
@@ -458,6 +462,7 @@ em_cpufreq_update_efficiencies(struct device *dev, struct em_perf_state *table)
 {
 	struct em_perf_domain *pd = dev->em_pd;
 	struct cpufreq_policy *policy;
+	struct cpufreq_frequency_table *pos;
 	int found = 0;
 	int i, cpu;
 
@@ -476,6 +481,12 @@ em_cpufreq_update_efficiencies(struct device *dev, struct em_perf_state *table)
 		dev_warn(dev, "EM: Access to CPUFreq policy failed\n");
 		return;
 	}
+
+	/* A replacement EM can make a formerly inefficient OPP efficient. */
+	policy->efficiencies_available = false;
+	cpufreq_for_each_valid_entry(pos, policy->freq_table)
+		pos->flags &= ~CPUFREQ_INEFFICIENT_FREQ;
+	pd->flags &= ~EM_PERF_DOMAIN_SKIP_INEFFICIENCIES;
 
 	for (i = 0; i < pd->nr_perf_states; i++) {
 		if (!(table[i].flags & EM_PERF_STATE_INEFFICIENT))
